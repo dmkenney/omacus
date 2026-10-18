@@ -1,0 +1,10 @@
+#!/bin/bash
+
+# Run every Omacus test: the Model.js unit tests and the helper tests against
+# the fake incus client.
+
+set -e
+
+cd "$(dirname "$0")/.."
+node tests/model-test.mjs
+/usr/bin/python3 -I tests/helper_test.py

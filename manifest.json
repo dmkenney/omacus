@@ -1,0 +1,116 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.dmkenney.omacus",
+  "name": "Omacus",
+  "version": "0.1.0",
+  "author": "dmkenney",
+  "license": "MIT",
+  "homepage": "https://github.com/dmkenney/omacus",
+  "description": "Incus for the Omarchy bar: containers and VMs across all your servers, live from Incus events. IPs, CPU and memory, snapshot age, storage pools, warnings and running tasks, with start, stop, snapshot, shell and console a click away.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "Panel.qml"
+  },
+  "keepLoaded": true,
+  "barWidget": {
+    "displayName": "Omacus",
+    "description": "Incus containers and VMs: status, usage, snapshots, storage and actions. Left click opens the panel; middle or right click refreshes.",
+    "category": "System",
+    "allowMultiple": true,
+    "defaultSection": "right",
+    "defaults": {
+      "remotes": "",
+      "barLabel": "running",
+      "notifications": "all",
+      "watched": "",
+      "readOnly": false,
+      "snapshotWarnDays": 7,
+      "poolWarnPercent": 85,
+      "statsIntervalSec": 5,
+      "incusPath": ""
+    },
+    "schema": [
+      {
+        "key": "remotes",
+        "type": "string",
+        "label": "Servers",
+        "defaultValue": "",
+        "description": "Comma-separated incus remote names to show. Empty shows every remote. Add a second widget with a different list for one bar item per server."
+      },
+      {
+        "key": "barLabel",
+        "type": "enum",
+        "label": "Bar label",
+        "options": [
+          { "value": "running", "label": "Running count" },
+          { "value": "running-total", "label": "Running / total" },
+          { "value": "none", "label": "Icon only" }
+        ],
+        "defaultValue": "running"
+      },
+      {
+        "key": "notifications",
+        "type": "enum",
+        "label": "Notifications",
+        "options": [
+          { "value": "all", "label": "All" },
+          { "value": "watched", "label": "Only stops of watched instances, plus server problems" },
+          { "value": "off", "label": "Off" }
+        ],
+        "defaultValue": "all"
+      },
+      {
+        "key": "watched",
+        "type": "string",
+        "label": "Watched instances",
+        "defaultValue": "",
+        "description": "Comma-separated remote:instance pairs. A watched instance that is not running turns the bar icon red."
+      },
+      {
+        "key": "readOnly",
+        "type": "boolean",
+        "label": "Read-only",
+        "defaultValue": false,
+        "description": "Hide start, stop, snapshot, shell, console and launch."
+      },
+      {
+        "key": "snapshotWarnDays",
+        "type": "integer",
+        "label": "Warn when the newest snapshot is older than (days, 0 = never)",
+        "min": 0,
+        "max": 365,
+        "step": 1,
+        "defaultValue": 7
+      },
+      {
+        "key": "poolWarnPercent",
+        "type": "integer",
+        "label": "Warn when a storage pool is this full (%)",
+        "min": 50,
+        "max": 99,
+        "step": 1,
+        "defaultValue": 85
+      },
+      {
+        "key": "statsIntervalSec",
+        "type": "integer",
+        "label": "CPU and memory refresh while the panel is open (seconds)",
+        "min": 2,
+        "max": 60,
+        "step": 1,
+        "defaultValue": 5
+      },
+      {
+        "key": "incusPath",
+        "type": "path",
+        "label": "incus client path",
+        "defaultValue": "",
+        "description": "Empty looks in /usr/bin, /usr/local/bin, ~/.local/bin and ~/bin."
+      }
+    ]
+  }
+}

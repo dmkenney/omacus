@@ -1,0 +1,287 @@
+#!/usr/bin/python3 -I
+# A stand-in for the incus client, for tests and screenshots. It answers the
+# handful of commands Omacus runs with made-up homelab data, keeps instance
+# state in $FAKE_INCUS_STATE so start and stop stick, and streams lifecycle
+# events for those changes to `incus monitor`.
+#
+# Point the plugin at it with the `incusPath` setting. Nothing here talks to a
+# real server.
+
+import json
+import math
+import os
+import sys
+import tempfile
+import time
+
+STATE_DIR = os.environ.get("FAKE_INCUS_STATE") or os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/nonexistent"), "omacus-fake-incus")
+NOW = time.time()
+DAY = 86400
+
+
+def iso(seconds_ago):
+  return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(NOW - seconds_ago))
+
+
+def instance(name, kind="container", status="Running", project="default", ip="", mem=(256, 1024), disk=(2, 20),
+             snaps=(), schedule="", image=("Debian", "bookworm", "20260901_05:24"), ports=(), limits_cpu="2", agent=True,
+             uptime=3 * DAY, description=""):
+  return {
+    "name": name, "type": kind, "status": status, "project": project, "ip": ip, "mem": list(mem), "disk": list(disk),
+    "snaps": list(snaps), "schedule": schedule, "image": list(image), "ports": list(ports), "limitsCpu": limits_cpu,
+    "agent": agent, "uptime": uptime, "description": description,
+  }
+
+
+DEFAULT_STATE = {
+  "homelab": {
+    "host": {"name": "homelab", "threads": 16, "mem": [41, 64], "load": [1.24, 0.98]},
+    "instances": [
+      instance("web", ip="10.10.0.21", mem=(310, 1024), snaps=(2, 9, 16), schedule="@daily", ports=("tcp:0.0.0.0:80", "tcp:0.0.0.0:443"), description="Caddy reverse proxy"),
+      instance("db", ip="10.10.0.22", mem=(1650, 2048), disk=(14, 20), snaps=(12, 40), image=("Ubuntu", "noble", "20260815_07:42"), description="Postgres 17"),
+      instance("pihole", ip="10.10.0.53", mem=(120, 512), snaps=(1,), schedule="@weekly", image=("Alpine", "3.22", "20260920_13:00")),
+      instance("jellyfin", project="media", ip="10.10.0.30", mem=(900, 4096), disk=(48, 200), snaps=(3,), limits_cpu="4"),
+      instance("home-assistant", kind="virtual-machine", ip="10.10.0.40", mem=(1400, 4096), disk=(9, 32), snaps=(5,), image=("Home Assistant OS", "16.2", "")),
+      instance("win11", kind="virtual-machine", mem=(0, 8192), disk=(51, 80), agent=False, image=("Windows", "11", ""), limits_cpu="4"),
+      instance("minecraft", status="Error", ip="", mem=(0, 4096), uptime=0),
+      instance("build-runner", status="Stopped", mem=(0, 2048), snaps=(30,), uptime=0),
+      instance("old-wiki", status="Frozen", ip="10.10.0.61", mem=(200, 512), uptime=20 * DAY),
+    ],
+    "pools": [["default", "zfs", 412, 500], ["fast", "btrfs", 180, 250]],
+    "warnings": [["Couldn't find the CGroup blkio.weight, disk priority will be ignored", "low"]],
+    "operations": [],
+  },
+  "nas": {
+    "host": {"name": "nas", "threads": 4, "mem": [11, 16], "load": [0.4, 0.5]},
+    "instances": [
+      instance("backups", ip="192.168.1.50", mem=(180, 1024), snaps=(1, 2, 3), schedule="@daily"),
+      instance("syncthing", ip="192.168.1.51", mem=(240, 1024), snaps=(6,)),
+      instance("testbox", kind="virtual-machine", status="Stopped", mem=(0, 2048), uptime=0),
+    ],
+    "pools": [["tank", "zfs", 3400, 3600]],
+    "warnings": [],
+    "operations": [["Downloading image", 63]],
+  },
+}
+
+
+def state_path():
+  return os.path.join(STATE_DIR, "state.json")
+
+
+def load_state():
+  try:
+    with open(state_path()) as f:
+      return json.load(f)
+  except (OSError, ValueError):
+    return json.loads(json.dumps(DEFAULT_STATE))
+
+
+def save_state(state):
+  os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+  fd, tmp = tempfile.mkstemp(dir=STATE_DIR, prefix=".state.")
+  with os.fdopen(fd, "w") as f:
+    json.dump(state, f)
+  os.replace(tmp, state_path())
+
+
+def add_event(remote, event):
+  os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+  with open(os.path.join(STATE_DIR, "events-%s.jsonl" % remote), "a") as f:
+    f.write(json.dumps(event) + "\n")
+
+
+def err(message, code=1):
+  sys.stderr.write("Error: %s\n" % message)
+  sys.exit(code)
+
+
+def check_remote(state, remote):
+  if remote not in state:
+    err("Get \"https://%s:8443/1.0\": dial tcp: lookup %s: no such host" % (remote, remote))
+
+
+def render_instance(item):
+  running = item["status"] in ("Running", "Frozen")
+  mem_used, mem_limit = item["mem"]
+  disk_used, disk_total = item["disk"]
+  network = {}
+  if running and item["agent"]:
+    addresses = [{"family": "inet6", "address": "fe80::216:3eff:fe00:1", "scope": "link"}]
+    if item["ip"]:
+      addresses.insert(0, {"family": "inet", "address": item["ip"], "netmask": "24", "scope": "global"})
+    network["eth0"] = {"addresses": addresses, "counters": {"bytes_received": 812345678, "bytes_sent": 123456789}, "type": "broadcast", "state": "up"}
+    network["lo"] = {"addresses": [{"family": "inet", "address": "127.0.0.1", "scope": "local"}], "type": "loopback"}
+  cpus = int(item["limitsCpu"])
+  # A steady, made-up load so the panel can show a CPU percentage.
+  busy = (sum(map(ord, item["name"])) % 40 + 5) / 100.0
+  # Grows with the wall clock, a little faster or slower over time, so the
+  # panel's CPU readings and sparklines move. The wobble term keeps it rising.
+  phase = sum(map(ord, item["name"]))
+  seconds = (NOW - 1.7e9) - 2.1 * math.cos(NOW / 7.0 + phase)
+  cpu_usage = int(seconds * busy * cpus * 1e9) if running else 0
+  snapshots = [{"name": "snap%d" % i, "created_at": iso(days * DAY)} for i, days in enumerate(item["snaps"])]
+  config = {"limits.cpu": item["limitsCpu"], "limits.memory": "%dMiB" % mem_limit, "image.os": item["image"][0], "image.release": item["image"][1]}
+  if item["image"][2]:
+    config["image.serial"] = item["image"][2]
+  if item["schedule"]:
+    config["snapshots.schedule"] = item["schedule"]
+  devices = {"root": {"type": "disk", "path": "/", "pool": "default"}}
+  for i, listen in enumerate(item["ports"]):
+    devices["port%d" % i] = {"type": "proxy", "listen": listen, "connect": "tcp:127.0.0.1:%s" % listen.rsplit(":", 1)[1]}
+  return {
+    "name": item["name"],
+    "type": item["type"],
+    "status": item["status"],
+    "project": item["project"],
+    "description": item["description"],
+    "location": "none",
+    "created_at": iso(200 * DAY),
+    "last_used_at": iso(item["uptime"]) if running else iso(5 * DAY),
+    "config": config,
+    "profiles": ["default"],
+    "expanded_devices": devices,
+    "snapshots": snapshots,
+    "backups": [],
+    "state": {
+      "status": item["status"],
+      "pid": 4242 if running else 0,
+      "processes": (40 if item["agent"] else -1) if running else 0,
+      "started_at": iso(item["uptime"]) if running else "0001-01-01T00:00:00Z",
+      "cpu": {"usage": cpu_usage, "allocated_time": cpus * 1000000000},
+      "memory": {"usage": (mem_used if item["agent"] else 0) * 1048576 if running else 0, "total": mem_limit * 1048576},
+      "disk": {"root": {"usage": disk_used * 1073741824, "total": disk_total * 1073741824}},
+      "network": network,
+    },
+  }
+
+
+def query(state, target):
+  remote, _, path = target.partition(":")
+  check_remote(state, remote)
+  data = state[remote]
+  path, _, params = path.partition("?")
+  if path == "/1.0":
+    return {"environment": {"server_name": data["host"]["name"], "server_version": "7.5", "server_clustered": False}}
+  if path == "/1.0/instances":
+    return [render_instance(i) for i in data["instances"]]
+  if path == "/1.0/resources":
+    host = data["host"]
+    return {"cpu": {"total": host["threads"]}, "memory": {"used": host["mem"][0] * 1073741824, "total": host["mem"][1] * 1073741824},
+            "load": {"average_1min": host["load"][0], "average_5min": host["load"][1]}}
+  if path == "/1.0/storage-pools":
+    return [{"name": p[0], "driver": p[1], "status": "Created"} for p in data["pools"]]
+  if path.startswith("/1.0/storage-pools/") and path.endswith("/resources"):
+    name = path.split("/")[3]
+    for p in data["pools"]:
+      if p[0] == name:
+        return {"space": {"used": p[2] * 1073741824, "total": p[3] * 1073741824}}
+    err("Storage pool not found")
+  if path == "/1.0/warnings":
+    return [{"type": "Missing CGroup", "severity": w[1], "status": "new", "last_message": w[0], "count": 3,
+             "project": "", "location": "", "last_seen_at": iso(3600)} for w in data["warnings"]]
+  if path == "/1.0/operations":
+    return [{"id": "6916c8a6-9b7d-4abd-90b3-aedfec7ec7d%d" % i, "class": "task", "description": o[0], "status": "Running",
+             "created_at": iso(120), "metadata": {"download_progress": {"percent": o[1], "stage": "image", "speed": "12MB/s"}}}
+            for i, o in enumerate(data["operations"])]
+  err("not found")
+
+
+def find(state, target):
+  remote, _, name = target.partition(":")
+  check_remote(state, remote)
+  for item in state[remote]["instances"]:
+    if item["name"] == name:
+      return remote, item
+  err("Instance not found")
+
+
+def action(argv):
+  verb = argv[0]
+  args = [a for a in argv[1:] if a != "--"]
+  force = "--force" in args
+  if verb == "snapshot":
+    args = args[1:]
+  if "--project" in args:
+    i = args.index("--project")
+    del args[i:i + 2]
+  target = [a for a in args if not a.startswith("--")][0]
+  state = load_state()
+  remote, item = find(state, target)
+  time.sleep(0.6)
+  events = []
+  if verb == "start":
+    if item["status"] == "Running":
+      err("The instance is already running")
+    events.append("instance-resumed" if item["status"] == "Frozen" else "instance-started")
+    item["status"] = "Running"
+    item["uptime"] = 1
+  elif verb == "stop":
+    if item["status"] not in ("Running", "Frozen"):
+      err("The instance is already stopped")
+    item["status"] = "Stopped"
+    events.append("instance-stopped" if force else "instance-shutdown")
+  elif verb == "restart":
+    item["uptime"] = 1
+    events.append("instance-restarted")
+  elif verb == "pause":
+    item["status"] = "Frozen"
+    events.append("instance-paused")
+  elif verb == "snapshot":
+    item["snaps"] = [0] + item["snaps"]
+    events.append("instance-snapshot-created")
+  save_state(state)
+  for name in events:
+    add_event(remote, {"type": "lifecycle", "project": item["project"], "metadata": {
+      "action": name, "source": "/1.0/instances/%s" % item["name"], "requestor": {"username": os.environ.get("USER", "me"), "protocol": "tls"}}})
+
+
+def monitor(argv):
+  target = [a for a in argv if not a.startswith("--")][0]
+  remote = target.rstrip(":")
+  check_remote(load_state(), remote)
+  path = os.path.join(STATE_DIR, "events-%s.jsonl" % remote)
+  try:
+    offset = os.path.getsize(path)
+  except OSError:
+    offset = 0
+  while True:
+    try:
+      with open(path) as f:
+        f.seek(offset)
+        for line in f:
+          sys.stdout.write(json.dumps(json.loads(line), separators=(",", ":")) + "\n\n")
+        offset = f.tell()
+      sys.stdout.flush()
+    except OSError:
+      pass
+    time.sleep(0.2)
+
+
+def main(argv):
+  if not argv:
+    err("missing command")
+  command = argv[0]
+  if command == "version":
+    print("Client version: 7.5\nServer version: unreachable")
+  elif command == "remote" and argv[1:2] == ["list"]:
+    print(json.dumps({
+      "local": {"Addrs": ["unix://"], "Protocol": "incus", "AuthType": "file access", "Public": False},
+      "images": {"Addrs": ["https://images.linuxcontainers.org"], "Protocol": "simplestreams", "Public": True},
+      "homelab": {"Addrs": ["https://homelab.lan:8443"], "Protocol": "incus", "AuthType": "tls", "Public": False},
+      "nas": {"Addrs": ["https://nas.lan:8443"], "Protocol": "incus", "AuthType": "tls", "Public": False},
+    }))
+  elif command == "remote" and argv[1:2] == ["get-default"]:
+    print("homelab")
+  elif command == "query":
+    print(json.dumps(query(load_state(), [a for a in argv[1:] if a != "--"][-1]), indent=2))
+  elif command == "monitor":
+    monitor(argv[1:])
+  elif command in ("start", "stop", "restart", "pause", "snapshot"):
+    action(argv)
+  else:
+    err("unknown command %s" % command)
+
+
+if __name__ == "__main__":
+  main(sys.argv[1:])
