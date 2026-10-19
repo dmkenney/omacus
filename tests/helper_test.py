@@ -142,6 +142,20 @@ class Compaction(unittest.TestCase):
     self.assertNotIn("‮", item["description"])
     self.assertLessEqual(len(item["description"]), helper.TEXT_CAP)
 
+  def test_incus_nic_addresses_come_before_inner_bridges(self):
+    def nic(address, host_name=""):
+      return {"host_name": host_name, "addresses": [{"family": "inet", "address": address, "scope": "global"}]}
+    item = helper.compact_instance({
+      "name": "web",
+      "project": "default",
+      "state": {"network": {
+        "br-3c9dc808d653": nic("172.18.0.1"),
+        "docker0": nic("172.17.0.1"),
+        "eth0": nic("10.240.31.229", "veth4774a99f"),
+      }},
+    })
+    self.assertEqual(item["ipv4"], ["10.240.31.229", "172.18.0.1", "172.17.0.1"])
+
   def test_instance_count_is_capped(self):
     raw = [{"name": "i%d" % n, "project": "default"} for n in range(helper.MAX_INSTANCES + 50)]
     self.assertEqual(len(helper.instances_from(raw)), helper.MAX_INSTANCES)

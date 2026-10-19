@@ -407,7 +407,10 @@ def compact_instance(raw):
   ipv6 = []
   rx = 0
   tx = 0
-  for nic_name, nic in as_dict(state.get("network")).items():
+  # Incus-managed NICs have a host-side interface; bridges made inside the
+  # instance (Docker's, say) don't. List the Incus ones' addresses first.
+  nics = sorted(as_dict(state.get("network")).items(), key=lambda item: not as_dict(item[1]).get("host_name"))
+  for nic_name, nic in nics:
     nic = as_dict(nic)
     if nic_name == "lo" or clean(nic.get("type"), 20) == "loopback":
       continue
