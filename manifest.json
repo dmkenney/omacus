@@ -24,13 +24,14 @@
     "defaultSection": "right",
     "defaults": {
       "remotes": "",
-      "barLabel": "running",
+      "barLabel": "none",
       "notifications": "all",
       "watched": "",
       "readOnly": false,
       "snapshotWarnDays": 7,
       "poolWarnPercent": 85,
       "statsIntervalSec": 5,
+      "backgroundStats": true,
       "incusPath": ""
     },
     "schema": [
@@ -50,7 +51,7 @@
           { "value": "running-total", "label": "Running / total" },
           { "value": "none", "label": "Icon only" }
         ],
-        "defaultValue": "running"
+        "defaultValue": "none"
       },
       {
         "key": "notifications",
@@ -103,6 +104,13 @@
         "max": 60,
         "step": 1,
         "defaultValue": 5
+      },
+      {
+        "key": "backgroundStats",
+        "type": "boolean",
+        "label": "CPU graph",
+        "defaultValue": true,
+        "description": "Read CPU use every 30 seconds while the panel is closed, so each instance shows its last 15 minutes. Off stops that polling and hides the graph."
       },
       {
         "key": "incusPath",

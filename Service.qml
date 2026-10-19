@@ -50,6 +50,7 @@ Item {
   readonly property int snapshotWarnDays: intSetting("snapshotWarnDays", 7, 0, 365)
   readonly property int poolWarnPercent: intSetting("poolWarnPercent", 85, 50, 99)
   readonly property int statsIntervalSec: intSetting("statsIntervalSec", 5, 2, 60)
+  readonly property bool backgroundStats: settings.backgroundStats !== false
   readonly property string configuredIncusPath: {
     var path = String(settings.incusPath || "")
     return path.charAt(0) === "/" && path.length < 4096 ? path : ""
@@ -131,11 +132,9 @@ Item {
 
   function panelClosed() {
     openPanels = Math.max(0, openPanels - 1)
-    if (openPanels === 0) {
-      // Sparklines describe what you watched; start fresh next time.
-      history = ({})
-      cpuNow = ({})
-    }
+    // Without background stats nothing keeps these current while closed.
+    if (openPanels === 0 && !backgroundStats) cpuNow = ({})
+
   }
 
   // Helper calls
@@ -235,7 +234,7 @@ Item {
     var threads = host ? host.cpuThreads : null
     var nextSamples = Object.assign({}, samples)
     var nextCpu = Object.assign({}, cpuNow)
-    var nextHistory = openPanels > 0 ? Object.assign({}, history) : history
+    var nextHistory = backgroundStats ? Object.assign({}, history) : history
     var seen = {}
     for (var i = 0; i < instances.length; i++) {
       var inst = instances[i]
@@ -246,19 +245,23 @@ Item {
       nextSamples[key] = sample
       if (pct !== null) nextCpu[key] = pct
       else if (!Model.isRunning(inst)) delete nextCpu[key]
-      if (openPanels > 0 && Model.isRunning(inst) && pct !== null) {
-        var h = nextHistory[key] || { cpu: [], mem: [] }
-        nextHistory[key] = { cpu: Model.pushHistory(h.cpu, pct), mem: Model.pushHistory(h.mem, Model.memPercent(inst)) }
+      if (backgroundStats && Model.isRunning(inst)) {
+        var h = nextHistory[key] || { cpu: [], base: null }
+        if (!h.base) nextHistory[key] = { cpu: h.cpu, base: sample }
+        else if (at - h.base.at >= Model.HISTORY_STEP_MS) {
+          var avg = Model.cpuPercent(h.base, sample, threads)
+          nextHistory[key] = { cpu: avg === null ? h.cpu : Model.pushHistory(h.cpu, avg, at), base: sample }
+        }
       }
     }
     // Forget instances that went away on this remote.
     var prefix = name + "/"
     for (var k in nextSamples) if (k.indexOf(prefix) === 0 && !seen[k]) delete nextSamples[k]
     for (var c in nextCpu) if (c.indexOf(prefix) === 0 && !seen[c]) delete nextCpu[c]
-    if (openPanels > 0) for (var hk in nextHistory) if (hk.indexOf(prefix) === 0 && !seen[hk]) delete nextHistory[hk]
+    if (backgroundStats) for (var hk in nextHistory) if (hk.indexOf(prefix) === 0 && !seen[hk]) delete nextHistory[hk]
     samples = nextSamples
     cpuNow = nextCpu
-    if (openPanels > 0) history = nextHistory
+    if (backgroundStats) history = nextHistory
   }
 
   // Notifications fire on a change, never for what was already true when the
@@ -344,6 +347,27 @@ Item {
     Quickshell.execDetached(["omarchy-launch-terminal", "bash", "-c", script, "omacus"].concat(argv))
   }
 
+  // Omarchy's floating terminal runs one shell string and ends with its own
+  // done or failed prompt.
+  function presentCommand(argv) {
+    var line = argv.map(function(a) { return "'" + String(a).replace(/'/g, "'\\''") + "'" }).join(" ")
+    Quickshell.execDetached(["omarchy-launch-floating-terminal-with-presentation", line])
+  }
+
+  function installClient() {
+    if (!installed) presentCommand(["omarchy-pkg-add", "incus"])
+  }
+
+  function addRemote() {
+    if (!installed) return
+    // The token goes straight from the prompt to incus; Omacus never sees it.
+    var script = 'read -r -p "Server name (e.g. homelab): " name || exit 130\n'
+      + 'if ! [[ $name =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]]; then echo "Use letters, digits, dots, dashes and underscores."; exit 1; fi\n'
+      + 'read -r -p "Trust token: " token || exit 130\n'
+      + '"$1" remote add "$name" "$token"'
+    presentCommand(["bash", "-c", script, "omacus", incusPath])
+  }
+
   function openShell(remote, inst) {
     if (readOnly || !installed || !Model.validName(remote) || !Model.validName(inst.project) || !Model.validInstanceName(inst.name)) return
     terminalCommand([incusPath, "exec", "--project", inst.project, remote + ":" + inst.name, "--", "su", "-l"])
@@ -360,6 +384,10 @@ Item {
     if (vm) argv.push("--vm")
     terminalCommand(argv.concat([image, remote + ":" + name]))
     return true
+  }
+
+  function openReadme() {
+    Quickshell.execDetached(["omarchy-launch-browser", Model.readmeSettingsUrl])
   }
 
   function copyText(text) {
@@ -383,6 +411,15 @@ Item {
 
   Component.onCompleted: discover()
   Component.onDestruction: shuttingDown = true
+
+  // A new client path means new streams: drop the watchers running on the
+  // old one, then look again.
+  onBackgroundStatsChanged: if (!backgroundStats) history = ({})
+
+  onConfiguredIncusPathChanged: {
+    remotes = []
+    discover()
+  }
 
   HelperRun {
     id: probeRun
@@ -455,10 +492,12 @@ Item {
     onTriggered: root.discover()
   }
 
+  // Incus sends no event for CPU or memory use, so poll: quickly while a
+  // panel is open, and every 30 seconds otherwise to fill the CPU graph.
   Timer {
-    interval: root.statsIntervalSec * 1000
+    interval: root.openPanels > 0 ? root.statsIntervalSec * 1000 : Model.BACKGROUND_STATS_MS
     repeat: true
-    running: root.openPanels > 0 && root.watchedRemotes.length > 0
+    running: root.watchedRemotes.length > 0 && (root.openPanels > 0 || root.backgroundStats)
     onTriggered: root.statsTick()
   }
 

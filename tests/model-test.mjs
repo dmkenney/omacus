@@ -148,9 +148,22 @@ test("parseList trims, dedupes and bounds", () => {
 
 test("pushHistory keeps a bounded window", () => {
   let h = []
-  for (let i = 0; i < 100; i++) h = Model.pushHistory(h, i)
+  for (let i = 0; i < 1000; i++) h = Model.pushHistory(h, i, i)
   assert.equal(h.length, Model.MAX_HISTORY)
-  assert.equal(h[h.length - 1], 99)
+  assert.deepEqual(h[h.length - 1], { t: 999, v: 999 })
+})
+
+test("pushHistory drops samples older than the window", () => {
+  let h = Model.pushHistory([], 1, 0)
+  h = Model.pushHistory(h, 2, Model.HISTORY_WINDOW_MS + 1)
+  assert.deepEqual(h, [{ t: Model.HISTORY_WINDOW_MS + 1, v: 2 }])
+})
+
+test("historyScale follows the peak with a 1% floor", () => {
+  assert.equal(Model.historyScale([{ t: 0, v: 0.2 }, { t: 1, v: 0.4 }]), 1)
+  assert.equal(Model.historyScale([{ t: 0, v: 2 }, { t: 1, v: 4 }]), 4)
+  assert.equal(Model.historyScale([{ t: 0, v: 2 }, { t: 1, v: 42 }]), 42)
+  assert.equal(Model.historyScale([{ t: 0, v: 250 }]), 100)
 })
 
 if (failures > 0) {

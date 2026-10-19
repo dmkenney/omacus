@@ -1,9 +1,8 @@
 import QtQuick
 
 // Keeps one Incus remote current: a full read when it starts, then one
-// `incus monitor` stream whose lifecycle events trigger a re-read. Nothing is
-// polled, except instance stats while the panel is open (Incus sends no event
-// for CPU or memory use).
+// `incus monitor` stream whose lifecycle events trigger a re-read. Only
+// instance stats are polled (Incus sends no event for CPU or memory use).
 Item {
   id: root
 

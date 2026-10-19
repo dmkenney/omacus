@@ -20,7 +20,7 @@ Incus in the Omarchy bar. Omacus shows the containers and VMs on every Incus ser
   - IPv4 address
   - uptime
   - OS
-  - CPU and memory use, with a CPU sparkline while the panel is open
+  - CPU and memory use, with a CPU graph of the last 15 minutes
 - **Instance details** (click or press `l`):
   - all addresses, memory, disk, CPU limit, network traffic
   - image and how old it is
@@ -41,7 +41,7 @@ Incus in the Omarchy bar. Omacus shows the containers and VMs on every Incus ser
   - warnings
   - running tasks with progress, such as image downloads
 - **New instance**: launch from an image (`images:debian/13`, say) as a container or VM, in a terminal so you see the progress.
-- **Web UI** link for HTTPS remotes, opening `https://<server>:8443/ui/`. This needs the `incus-ui` package on the server.
+- **Web UI** button for HTTPS remotes, opening `https://<server>:8443/ui/`. This needs the `incus-ui` package on the server.
 - **Notifications**:
   - an instance stops that you didn't stop from the panel
   - an instance enters an error state
@@ -77,18 +77,19 @@ omarchy plugin add https://github.com/dmkenney/omacus.git --enable
 
 ## Settings
 
-The panel's **Settings** row covers read-only mode, notifications and the bar label. Everything else is set with `omarchy bar set`:
+The panel's settings button (the cog) covers read-only mode, the CPU graph, notifications and the bar label. Everything else is set with `omarchy bar set`:
 
 | Setting | Default | Meaning |
 |---|---|---|
 | `remotes` | empty | Comma-separated remote names to show. Empty shows all. A local remote with no running daemon is hidden unless you name it. |
-| `barLabel` | `running` | `running`, `running-total` or `none`. |
+| `barLabel` | `none` | `none` (icon only), `running` (running count) or `running-total` (running/total). |
 | `notifications` | `all` | `all`, `watched` (stops only for watched instances, plus server problems) or `off`. |
 | `watched` | empty | Comma-separated `remote:instance` pairs. Also toggled with the eye button on an instance. |
 | `readOnly` | `false` | Hide every action that changes anything. |
 | `snapshotWarnDays` | `7` | Flag running instances whose newest snapshot is older than this. `0` turns it off. |
 | `poolWarnPercent` | `85` | Flag storage pools at least this full. |
 | `statsIntervalSec` | `5` | How often CPU and memory refresh while the panel is open. |
+| `backgroundStats` | `true` | Read CPU use every 30 seconds while the panel is closed, so each instance shows a 15-minute CPU graph. `false` stops that polling and hides the graph. |
 | `incusPath` | empty | Full path to the client. Empty looks in `/usr/bin`, `/usr/local/bin`, `~/.local/bin` and `~/bin`. |
 
 ```bash
@@ -103,8 +104,8 @@ For one bar item per server, add the widget twice and give each its own `remotes
 
 | Key | Action |
 |---|---|
-| `j` / `k` | Move down / up |
-| `l` / `h` | Expand an instance, then move between its buttons / collapse |
+| `j` / `k` | Move down / up. The header buttons (new instance, web UI, settings, refresh) are the first stop |
+| `l` / `h` | Move between header buttons; expand an instance, then move between its buttons / collapse |
 | `Enter` / `Space` | Open the row, or press the selected button |
 | `/` | Filter by name, IP, project, image or profile |
 | `s` | Shell into the selected instance |
@@ -120,7 +121,7 @@ The panel also answers to `omarchy-shell io.github.dmkenney.omacus toggle` (and 
 
 - `helper.py` runs every `incus` command with a deadline, an output size cap and its own process group, and prints a small JSON document.
 - Each server gets one full read (`incus query` of instances, resources, storage pools, warnings and operations) and then one long-running `incus monitor` for lifecycle and operation events. An event triggers a re-read of that server, so nothing polls while the panel is closed.
-- CPU and memory have no events, so while the panel is open they are read every `statsIntervalSec`. CPU is shown as a share of what the instance may use (its `limits.cpu`, or the host's threads).
+- CPU and memory have no events, so they are polled: every `statsIntervalSec` while the panel is open, and every 30 seconds otherwise (unless `backgroundStats` is off). CPU is shown as a share of what the instance may use (its `limits.cpu`, or the host's threads).
 - If a server drops, Omacus reconnects after 2 s, 4 s, 8 s and so on, up to five minutes, and re-reads it when the stream is back.
 - A restricted client certificate that can't list every project falls back to the remote's own project.
 

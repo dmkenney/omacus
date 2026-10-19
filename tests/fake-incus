@@ -115,10 +115,11 @@ def render_instance(item):
   cpus = int(item["limitsCpu"])
   # A steady, made-up load so the panel can show a CPU percentage.
   busy = (sum(map(ord, item["name"])) % 40 + 5) / 100.0
-  # Grows with the wall clock, a little faster or slower over time, so the
-  # panel's CPU readings and sparklines move. The wobble term keeps it rising.
+  # Grows with the wall clock, a little faster or slower over a few minutes,
+  # so the panel's CPU readings and graphs move. The wobble term keeps it
+  # rising.
   phase = sum(map(ord, item["name"]))
-  seconds = (NOW - 1.7e9) - 2.1 * math.cos(NOW / 7.0 + phase)
+  seconds = (NOW - 1.7e9) - 20 * math.cos(NOW / 90.0 + phase)
   cpu_usage = int(seconds * busy * cpus * 1e9) if running else 0
   snapshots = [{"name": "snap%d" % i, "created_at": iso(days * DAY)} for i, days in enumerate(item["snaps"])]
   config = {"limits.cpu": item["limitsCpu"], "limits.memory": "%dMiB" % mem_limit, "image.os": item["image"][0], "image.release": item["image"][1]}

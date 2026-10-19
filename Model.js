@@ -4,7 +4,13 @@
 // needs attention. Nothing here starts a process or touches QML objects, so
 // tests/model-test.mjs can load it in Node.
 
-var MAX_HISTORY = 30
+// The CPU graph covers the last 15 minutes, one point about every 30 seconds.
+var HISTORY_WINDOW_MS = 15 * 60 * 1000
+var MAX_HISTORY = 60
+var BACKGROUND_STATS_MS = 30000
+// A graph point averages CPU over at least this long, so the faster samples
+// taken while the panel is open don't add noisy, bunched-up points.
+var HISTORY_STEP_MS = 25000
 var INSTANCE_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,62}$/
 var NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/
 var IMAGE_RE = /^[A-Za-z0-9][A-Za-z0-9._:\/@-]{0,199}$/
@@ -12,6 +18,8 @@ var IP_RE = /^[0-9A-Fa-f:.]{2,45}$/
 var HTTPS_RE = /^https:\/\/[A-Za-z0-9.\-]+(:[0-9]{1,5})?\/?$|^https:\/\/\[[0-9A-Fa-f:]+\](:[0-9]{1,5})?\/?$/
 
 function glyph(codepoint) { return String.fromCodePoint(codepoint) }
+
+var readmeSettingsUrl = "https://github.com/dmkenney/omacus#settings"
 
 var glyphs = {
   incus: glyph(0xF01A7),      // cube outline
@@ -29,6 +37,7 @@ var glyphs = {
   copy: glyph(0xF018F),
   web: glyph(0xF059F),
   plus: glyph(0xF0415),
+  download: glyph(0xF01DA),
   pool: glyph(0xF01BC),       // database
   refresh: glyph(0xF0450),
   eye: glyph(0xF0208),
@@ -250,10 +259,20 @@ function attention(remoteStates, opts) {
   return items
 }
 
-function pushHistory(history, value) {
-  var next = (history || []).slice(-(MAX_HISTORY - 1))
-  next.push(value === null || value === undefined ? 0 : value)
+// History entries are { t: ms, v: percent }, oldest first.
+function pushHistory(history, value, at) {
+  var since = at - HISTORY_WINDOW_MS
+  var next = (history || []).filter(function(p) { return p.t > since }).slice(-(MAX_HISTORY - 1))
+  next.push({ t: at, v: value === null || value === undefined ? 0 : value })
   return next
+}
+
+// Top of the graph: the window's peak, but at least 1% so near-zero noise
+// stays flat. The CPU figure beside the graph gives the real level.
+function historyScale(history) {
+  var peak = 1
+  for (var i = 0; i < (history || []).length; i++) peak = Math.max(peak, Number(history[i].v) || 0)
+  return Math.min(100, peak)
 }
 
 function validInstanceName(name) { return INSTANCE_RE.test(String(name || "")) }

@@ -39,6 +39,17 @@ Panel {
   property string launchName: ""
   property string launchError: ""
   property bool settingsOpen: false
+  // How far row highlights reach past the content edge: the rows' own inner
+  // margin, so their text lines up with the rest of the panel.
+  readonly property real rowBleed: Style.space(8)
+  readonly property var headerButtons: {
+    var list = []
+    if (omacus.installed && !omacus.readOnly && visibleRemotes.length > 0) list.push("launch")
+    if (webRemote() !== "") list.push("web")
+    list.push("settings")
+    if (omacus.installed) list.push("refresh")
+    return list
+  }
   property bool cursorActive: false
   property string cursorKey: ""
   property var rowItems: ({})
@@ -51,7 +62,7 @@ Panel {
   readonly property color hoverFill: bar ? Style.hoverFillFor(bar.foreground, Commons.Color.accent) : "transparent"
   readonly property color selectedFill: bar ? Style.selectedFillFor(bar.foreground, Commons.Color.accent) : "transparent"
 
-  readonly property string barLabel: ["running", "running-total", "none"].indexOf(String(setting("barLabel", "running"))) !== -1 ? String(setting("barLabel", "running")) : "running"
+  readonly property string barLabel: ["running", "running-total", "none"].indexOf(String(setting("barLabel", "none"))) !== -1 ? String(setting("barLabel", "none")) : "none"
   readonly property var widgetRemotes: Model.parseList(setting("remotes", ""))
   readonly property var visibleRemotes: {
     var out = []
@@ -168,16 +179,12 @@ Panel {
   }
 
   function buildCursorKeys() {
-    var keys = []
+    var keys = ["header"]
+    if (omacus.checked && !omacus.installed) keys.push("setup:install")
+    else if (omacus.checked && visibleRemotes.length === 0) keys.push("setup:remote")
     for (var a = 0; a < attentionList.length; a++) keys.push("att:" + attentionList[a].key)
     if (visibleRemotes.length > 1) keys.push("tabs")
     for (var i = 0; i < instanceRows.length; i++) if (instanceRows[i].kind === "instance") keys.push("inst:" + instanceRows[i].key)
-    if (omacus.installed && !omacus.readOnly && visibleRemotes.length > 0) keys.push("launch")
-    for (var w = 0; w < hostRemotes.length; w++) {
-      var info = omacus.remoteInfo(hostRemotes[w].name)
-      if (info && Model.webUiUrl(info.addr) !== "") keys.push("web:" + hostRemotes[w].name)
-    }
-    keys.push("settings")
     return keys
   }
 
@@ -210,6 +217,10 @@ Panel {
   }
 
   function moveSideways(dx) {
+    if (cursorKey === "header") {
+      actionIndex = Math.max(0, Math.min(headerButtons.length - 1, actionIndex + dx))
+      return
+    }
     if (cursorKey === "tabs") {
       var names = [""]
       for (var i = 0; i < visibleRemotes.length; i++) names.push(visibleRemotes[i].name)
@@ -241,6 +252,7 @@ Panel {
       for (var a = 0; a < attentionList.length; a++) if (attentionList[a].key === key) focusAttention(attentionList[a])
       return
     }
+    if (cursorKey.indexOf("setup:") === 0) { activateSetup(cursorKey); return }
     if (cursorKey === "tabs") { moveSideways(1); return }
     var row = selectedInstanceRow()
     if (row) {
@@ -253,9 +265,13 @@ Panel {
       }
       return
     }
-    if (cursorKey === "launch") { toggleLaunch(); return }
-    if (cursorKey.indexOf("web:") === 0) { omacus.openWebUi(cursorKey.substring(4)); close(); return }
-    if (cursorKey === "settings") settingsOpen = !settingsOpen
+    if (cursorKey === "header" && headerButtons.length > 0) runHeaderButton(headerButtons[Math.min(actionIndex, headerButtons.length - 1)])
+  }
+
+  function activateSetup(key) {
+    if (key === "setup:install") omacus.installClient()
+    else omacus.addRemote()
+    close()
   }
 
   function focusAttention(item) {
@@ -340,7 +356,12 @@ Panel {
     else if (id === "watch") toggleWatch(remote, inst)
     else if (id === "shell") { omacus.openShell(remote, inst); close() }
     else if (id === "console") { omacus.openConsole(remote, inst); close() }
-    else omacus.runAction(id, remote, inst)
+    else {
+      // Start, stop and pause change which buttons show; don't leave the
+      // cursor on whatever slides into the old slot.
+      if (id !== "snapshot") actionIndex = 0
+      omacus.runAction(id, remote, inst)
+    }
   }
 
   function startSearch() {
@@ -354,10 +375,36 @@ Panel {
     if (panel.loadedContent) panel.loadedContent.forceActiveFocus()
   }
 
+  // The remote whose web UI the header button opens: the selected tab, or
+  // the first connected remote that serves one.
+  function webRemote() {
+    for (var i = 0; i < hostRemotes.length; i++) {
+      var name = hostRemotes[i].name
+      if (selectedRemote !== "" && name !== selectedRemote) continue
+      var info = omacus.remoteInfo(name)
+      if (info && Model.webUiUrl(info.addr) !== "") return name
+    }
+    return ""
+  }
+
+  function runHeaderButton(id) {
+    if (id === "launch") toggleLaunch()
+    else if (id === "web") { omacus.openWebUi(webRemote()); close() }
+    else if (id === "settings") {
+      settingsOpen = !settingsOpen
+      if (settingsOpen) { launchOpen = false; if (panelFlick) panelFlick.contentY = 0 }
+    }
+    else if (id === "refresh") omacus.refresh()
+  }
+
   function toggleLaunch() {
     launchOpen = !launchOpen
     launchError = ""
-    if (launchOpen) Qt.callLater(function() { if (imageField) imageField.forceActiveFocus() })
+    if (launchOpen) {
+      settingsOpen = false
+      if (panelFlick) panelFlick.contentY = 0
+      Qt.callLater(function() { if (imageField) imageField.forceActiveFocus() })
+    }
   }
 
   function launchRemote() {
@@ -427,6 +474,10 @@ Panel {
     return parts.join("  ")
   }
 
+  function daysAgoText(days) {
+    return days === 0 ? strings.t("detail.today") : strings.tn("detail.daysAgo", days).arg(days)
+  }
+
   function detailLines(remote, inst) {
     var lines = []
     function add(label, value, warn) { if (value !== "" && value !== null && value !== undefined) lines.push({ label: label, value: String(value), warn: warn === true }) }
@@ -454,12 +505,12 @@ Panel {
     if (image !== "") add(strings.t("detail.image"), imageAge !== null ? strings.t("detail.imageAge").arg(image).arg(strings.tn("detail.days", imageAge).arg(imageAge)) : image)
     var snapAge = Model.snapshotAgeDays(inst)
     var snapText = inst.snapshots === 0 ? strings.t("detail.noSnapshots") : strings.tn("detail.snapshotCount", inst.snapshots).arg(inst.snapshots)
-    if (snapAge !== null) snapText += " · " + strings.t("detail.newest").arg(strings.tn("detail.daysAgo", snapAge).arg(snapAge))
+    if (snapAge !== null) snapText += " · " + strings.t("detail.newest").arg(daysAgoText(snapAge))
     if (inst.snapshotSchedule) snapText += " · " + strings.t("detail.schedule").arg(inst.snapshotSchedule)
     add(strings.t("detail.snapshots"), snapText, Model.snapshotStale(inst, omacus.snapshotWarnDays))
     if (inst.backups > 0) {
       var backupAge = Model.secondsSince(inst.newestBackup)
-      add(strings.t("detail.backups"), strings.tn("detail.backupCount", inst.backups).arg(inst.backups) + (backupAge !== null ? " · " + strings.t("detail.newest").arg(strings.tn("detail.daysAgo", Math.floor(backupAge / 86400)).arg(Math.floor(backupAge / 86400))) : ""))
+      add(strings.t("detail.backups"), strings.tn("detail.backupCount", inst.backups).arg(inst.backups) + (backupAge !== null ? " · " + strings.t("detail.newest").arg(daysAgoText(Math.floor(backupAge / 86400))) : ""))
     }
     if ((inst.ports || []).length > 0) add(strings.t("detail.ports"), inst.ports.join(", "))
     if ((inst.profiles || []).length > 0) add(strings.t("detail.profiles"), inst.profiles.join(", "))
@@ -535,6 +586,7 @@ Panel {
     property bool checked: false
     property bool installed: false
     property bool readOnly: true
+    property bool backgroundStats: false
     property var remoteList: []
     property var attentionItems: []
     property var watched: []
@@ -640,20 +692,35 @@ Panel {
         else if (row && (t === "w" || t === "W")) root.runInstanceAction(row.remote, row.inst, "watch")
       }
 
+      // The scroll area reaches into the panel's side padding so row
+      // highlights can extend past the text and the scroll bar has its own
+      // lane; the column puts the content back inside the padding.
       Flickable {
         id: panelFlick
         anchors.fill: parent
+        anchors.leftMargin: -Style.spacing.popupPadding
+        anchors.rightMargin: -Style.spacing.popupPadding
         contentWidth: width
         contentHeight: column.implicitHeight
         clip: true
         boundsBehavior: Flickable.StopAtBounds
         flickableDirection: Flickable.VerticalFlick
         interactive: contentHeight > height
-        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+        // Expanding a row grows the content past the fold; keep the cursor row in view.
+        onContentHeightChanged: if (root.cursorActive) root.scrollCursorIntoView()
+        ScrollBar.vertical: ScrollBar {
+          parent: panelFlick
+          anchors.top: panelFlick.top
+          anchors.bottom: panelFlick.bottom
+          anchors.right: panelFlick.right
+          anchors.rightMargin: Math.max(0, (Style.spacing.popupPadding - width) / 2)
+          policy: ScrollBar.AsNeeded
+        }
 
         Column {
           id: column
-          width: panelFlick.width
+          x: Style.spacing.popupPadding
+          width: panelFlick.width - Style.spacing.popupPadding * 2
           spacing: Style.space(12)
 
           PanelHero {
@@ -664,6 +731,8 @@ Panel {
             foreground: root.foreground
             fontFamily: root.fontFamily
             iconOpacity: root.counts.running > 0 ? 1.0 : 0.5
+            Component.onCompleted: root.registerRow("header", hero)
+            Component.onDestruction: root.unregisterRow("header", hero)
             iconComponent: Component {
               PlainText {
                 text: Model.glyphs.incus
@@ -672,13 +741,26 @@ Panel {
               }
             }
             trailingControl: Component {
-              PanelActionButton {
-                iconText: Model.glyphs.refresh
-                tooltipText: Model.plain(strings.t("action.refresh"), 40)
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                visible: root.omacus.installed
-                onClicked: root.omacus.refresh()
+              Row {
+                spacing: Style.space(2)
+                Repeater {
+                  model: root.headerButtons
+                  PanelActionButton {
+                    required property var modelData
+                    required property int index
+                    iconText: Model.glyphs[{ launch: "plus", web: "web", settings: "cog", refresh: "refresh" }[modelData]]
+                    tooltipText: Model.plain(modelData === "launch" ? strings.t("launch.title")
+                      : modelData === "web" ? strings.t("web.open").arg(root.webRemote())
+                      : modelData === "settings" ? strings.t("settings.title")
+                      : strings.t("action.refresh"), 40)
+                    hasCursor: root.hasCursor("header") && root.actionIndex === index
+                    bordered: (modelData === "launch" && root.launchOpen) || (modelData === "settings" && root.settingsOpen)
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                    onHovered: function(on) { if (on) { root.setCursor("header"); root.actionIndex = index } }
+                    onClicked: root.runHeaderButton(modelData)
+                  }
+                }
               }
             }
           }
@@ -692,180 +774,19 @@ Panel {
             wrapMode: Text.WordWrap
           }
 
-          // Setup help when there is nothing to show yet.
-          Column {
-            visible: root.omacus.checked && (!root.omacus.installed || root.visibleRemotes.length === 0)
-            width: parent.width
-            spacing: Style.space(8)
-
-            PlainText {
-              width: parent.width
-              text: !root.omacus.installed ? strings.t("setup.install") : strings.t("setup.addRemote")
-              color: root.foreground
-              font.pixelSize: Style.font.body
-              wrapMode: Text.WordWrap
-            }
-
-            Repeater {
-              model: !root.omacus.installed
-                ? ["omarchy pkg add incus"]
-                : ["incus config trust add laptop", "incus remote add homelab <token>"]
-              CommandLine {
-                required property var modelData
-                width: column.width
-                command: String(modelData)
-              }
-            }
-
-            PlainText {
-              width: parent.width
-              visible: root.omacus.installed
-              text: strings.t("setup.addRemoteNote")
-              color: root.dim
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WordWrap
-            }
-          }
-
-          // Attention
-          Column {
-            visible: root.attentionList.length > 0
-            width: parent.width
-            spacing: Style.space(6)
-
-            PanelSectionHeader {
-              text: strings.t("section.attention")
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            Repeater {
-              model: root.attentionList
-              ListRow {
-                required property var modelData
-                width: column.width
-                rowKey: "att:" + modelData.key
-                glyph: modelData.kind === "pool" ? Model.glyphs.pool : (modelData.kind === "remote" || modelData.kind === "member" ? Model.glyphs.server : (modelData.kind === "snapshot" ? Model.glyphs.snapshot : Model.glyphs.alert))
-                glyphColor: modelData.severity === "urgent" ? root.urgent : root.accent
-                title: root.attentionText(modelData)
-                detail: root.attentionDetail(modelData)
-                onChosen: root.focusAttention(modelData)
-              }
-            }
-          }
-
-          // Server tabs
-          Item {
-            id: tabsRow
-            visible: root.visibleRemotes.length > 1
-            width: parent.width
-            implicitHeight: tabs.implicitHeight
-            Component.onCompleted: root.registerRow("tabs", tabsRow)
-            Component.onDestruction: root.unregisterRow("tabs", tabsRow)
-
-            ButtonGroup {
-              id: tabs
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              focusable: false
-              cursorIndex: root.hasCursor("tabs") ? Math.max(0, root.visibleRemotes.map(function(r) { return r.name }).indexOf(root.selectedRemote) + 1) : -1
-              value: root.selectedRemote === "" ? "*" : root.selectedRemote
-              options: {
-                var list = [{ value: "*", label: Model.plain(strings.t("tabs.all"), 30) }]
-                for (var i = 0; i < root.visibleRemotes.length; i++) {
-                  var r = root.visibleRemotes[i]
-                  list.push({ value: r.name, label: Model.plain(r.name, 30), icon: r.status === "ok" ? "" : Model.glyphs.alert })
-                }
-                return list
-              }
-              onChanged: function(value) { root.selectedRemote = value === "*" ? "" : value }
-              onHovered: function(index, isHovered) { if (isHovered) root.setCursor("tabs") }
-            }
-          }
-
-          // Search
-          TextField {
-            id: searchField
-            visible: root.searchActive || root.query !== ""
-            width: parent.width
-            foreground: root.foreground
-            placeholderText: strings.t("search.placeholder")
-            maximumLength: 80
-            text: root.query
-            onTextChanged: root.query = text
-            onActiveFocusChanged: root.editing = activeFocus || imageField.activeFocus || nameField.activeFocus
-            Keys.onPressed: function(event) {
-              if (event.key === Qt.Key_Escape) { root.endSearch(true); event.accepted = true; return }
-              if (event.key === Qt.Key_Down || event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                root.endSearch(false)
-                root.cursorActive = true
-                var first = root.cursorKeys.filter(function(k) { return k.indexOf("inst:") === 0 })[0]
-                if (first) root.cursorKey = first
-                event.accepted = true
-              }
-            }
-          }
-
-          // Instances
-          Column {
-            visible: root.visibleRemotes.length > 0
-            width: parent.width
-            spacing: Style.space(6)
-
-            PanelSectionHeader {
-              text: strings.t("section.instances")
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            PlainText {
-              visible: root.instanceRows.length === 0
-              width: parent.width
-              text: root.connecting ? strings.t("hero.connecting") : (root.query !== "" ? strings.t("search.none") : strings.t("instances.none"))
-              color: root.dim
-              font.pixelSize: Style.font.body
-              horizontalAlignment: Text.AlignHCenter
-            }
-
-            Repeater {
-              model: root.instanceRows
-              Loader {
-                required property var modelData
-                width: column.width
-                sourceComponent: modelData.kind === "instance" ? instanceComponent : groupComponent
-                onLoaded: item.row = modelData
-                onModelDataChanged: if (item) item.row = modelData
-              }
-            }
-          }
-
-          // Hosts: storage, cluster, warnings and running tasks
-          Repeater {
-            model: root.hostRemotes
-            HostSection {
-              required property var modelData
-              width: column.width
-              rs: modelData
-            }
-          }
-
           // New instance
           Column {
-            visible: root.omacus.installed && !root.omacus.readOnly && root.visibleRemotes.length > 0
+            visible: root.launchOpen && root.headerButtons.indexOf("launch") !== -1
             width: parent.width
             spacing: Style.space(6)
 
-            ListRow {
-              width: parent.width
-              rowKey: "launch"
-              glyph: Model.glyphs.plus
-              title: strings.t("launch.title")
-              detail: root.launchOpen ? strings.t("launch.on").arg(root.launchRemote()) : strings.t("launch.hint")
-              onChosen: root.toggleLaunch()
+            PanelSectionHeader {
+              text: strings.t("launch.title") + " · " + strings.t("launch.on").arg(root.launchRemote())
+              foreground: root.foreground
+              fontFamily: root.fontFamily
             }
 
             Column {
-              visible: root.launchOpen
               width: parent.width
               spacing: Style.space(6)
 
@@ -932,41 +853,19 @@ Panel {
             }
           }
 
-          // Web UI links
-          Repeater {
-            model: root.hostRemotes.filter(function(r) {
-              var info = root.omacus.remoteInfo(r.name)
-              return info && Model.webUiUrl(info.addr) !== ""
-            })
-            ListRow {
-              required property var modelData
-              width: column.width
-              rowKey: "web:" + modelData.name
-              glyph: Model.glyphs.web
-              title: strings.t("web.open").arg(modelData.name)
-              detail: Model.webUiUrl((root.omacus.remoteInfo(modelData.name) || {}).addr).replace(/^https:\/\//, "")
-              onChosen: { root.omacus.openWebUi(modelData.name); root.close() }
-            }
-          }
-
-          PanelSeparator { foreground: root.foreground }
-
           // Settings
           Column {
+            visible: root.settingsOpen
             width: parent.width
             spacing: Style.space(8)
 
-            ListRow {
-              width: parent.width
-              rowKey: "settings"
-              glyph: Model.glyphs.cog
-              title: strings.t("settings.title")
-              detail: root.omacus.incusVersion !== "" ? strings.t("settings.version").arg(root.omacus.incusVersion) : ""
-              onChosen: root.settingsOpen = !root.settingsOpen
+            PanelSectionHeader {
+              text: strings.t("settings.title") + (root.omacus.incusVersion !== "" ? " · " + strings.t("settings.version").arg(root.omacus.incusVersion) : "")
+              foreground: root.foreground
+              fontFamily: root.fontFamily
             }
 
             GridLayout {
-              visible: root.settingsOpen
               width: parent.width
               columns: 2
               columnSpacing: Style.space(12)
@@ -982,6 +881,18 @@ Panel {
                 checked: root.setting("readOnly", false) === true
                 foreground: root.foreground
                 onToggled: root.saveSetting("readOnly", !(root.setting("readOnly", false) === true))
+              }
+
+              PlainText {
+                text: strings.t("settings.backgroundStats")
+                color: root.foreground
+                font.pixelSize: Style.font.body
+                Layout.fillWidth: true
+              }
+              ToggleSwitch {
+                checked: root.setting("backgroundStats", true) !== false
+                foreground: root.foreground
+                onToggled: root.saveSetting("backgroundStats", root.setting("backgroundStats", true) === false)
               }
 
               PlainText {
@@ -1024,13 +935,195 @@ Panel {
                 onChanged: function(value) { root.saveSetting("barLabel", value) }
               }
 
-              PlainText {
+              Text {
                 Layout.columnSpan: 2
                 Layout.fillWidth: true
-                text: strings.t("settings.more")
+                textFormat: Text.StyledText
+                text: Model.plain(strings.t("settings.more"), 300) + ' <a href="' + Model.readmeSettingsUrl + '">' + Model.plain(strings.t("settings.readme"), 40) + '</a>.'
                 color: root.dim
+                linkColor: root.foreground
+                font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
                 wrapMode: Text.WordWrap
+                onLinkActivated: root.omacus.openReadme()
+                HoverHandler { cursorShape: parent.hoveredLink !== "" ? Qt.PointingHandCursor : Qt.ArrowCursor }
+              }
+            }
+          }
+
+          // Setup help when there is nothing to show yet.
+          Column {
+            visible: root.omacus.checked && (!root.omacus.installed || root.visibleRemotes.length === 0)
+            width: parent.width
+            spacing: Style.space(8)
+
+            PlainText {
+              width: parent.width
+              text: !root.omacus.installed ? strings.t("setup.install") : strings.t("setup.addRemote")
+              color: root.foreground
+              font.pixelSize: Style.font.body
+              wrapMode: Text.WordWrap
+            }
+
+            ListRow {
+              visible: !root.omacus.installed
+              x: -root.rowBleed
+              width: column.width + root.rowBleed * 2
+              rowKey: "setup:install"
+              glyph: Model.glyphs.download
+              title: strings.t("setup.installButton")
+              detail: strings.t("setup.installDetail")
+              onChosen: root.activateSetup(rowKey)
+            }
+
+            CommandLine {
+              visible: root.omacus.installed
+              width: column.width
+              command: "incus config trust add laptop"
+            }
+
+            ListRow {
+              visible: root.omacus.installed
+              x: -root.rowBleed
+              width: column.width + root.rowBleed * 2
+              rowKey: "setup:remote"
+              glyph: Model.glyphs.plus
+              title: strings.t("setup.addRemoteButton")
+              detail: strings.t("setup.addRemoteDetail")
+              onChosen: root.activateSetup(rowKey)
+            }
+
+            PlainText {
+              width: parent.width
+              visible: root.omacus.installed
+              text: strings.t("setup.addRemoteNote")
+              color: root.dim
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+          }
+
+          // Attention
+          Column {
+            visible: root.attentionList.length > 0
+            width: parent.width
+            spacing: Style.space(6)
+
+            PanelSectionHeader {
+              text: strings.t("section.attention")
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Repeater {
+              model: root.attentionList
+              ListRow {
+                required property var modelData
+                x: -root.rowBleed
+                width: column.width + root.rowBleed * 2
+                rowKey: "att:" + modelData.key
+                glyph: modelData.kind === "pool" ? Model.glyphs.pool : (modelData.kind === "remote" || modelData.kind === "member" ? Model.glyphs.server : (modelData.kind === "snapshot" ? Model.glyphs.snapshot : Model.glyphs.alert))
+                glyphColor: modelData.severity === "urgent" ? root.urgent : root.accent
+                title: root.attentionText(modelData)
+                detail: root.attentionDetail(modelData)
+                onChosen: root.focusAttention(modelData)
+              }
+            }
+          }
+
+          // Server tabs
+          Item {
+            id: tabsRow
+            visible: root.visibleRemotes.length > 1
+            width: parent.width
+            implicitHeight: tabs.implicitHeight
+            Component.onCompleted: root.registerRow("tabs", tabsRow)
+            Component.onDestruction: root.unregisterRow("tabs", tabsRow)
+
+            ButtonGroup {
+              id: tabs
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              focusable: false
+              cursorIndex: root.hasCursor("tabs") ? Math.max(0, root.visibleRemotes.map(function(r) { return r.name }).indexOf(root.selectedRemote) + 1) : -1
+              value: root.selectedRemote === "" ? "*" : root.selectedRemote
+              options: {
+                var list = [{ value: "*", label: Model.plain(strings.t("tabs.all"), 30) }]
+                for (var i = 0; i < root.visibleRemotes.length; i++) {
+                  var r = root.visibleRemotes[i]
+                  list.push({ value: r.name, label: Model.plain(r.name, 30), icon: r.status === "ok" ? "" : Model.glyphs.alert })
+                }
+                return list
+              }
+              onChanged: function(value) { root.selectedRemote = value === "*" ? "" : value }
+              onHovered: function(index, isHovered) { if (isHovered) root.setCursor("tabs") }
+            }
+          }
+
+          // Search
+          TextField {
+            id: searchField
+            visible: root.searchActive || root.query !== ""
+            width: parent.width
+            foreground: root.foreground
+            placeholderText: strings.t("search.placeholder")
+            maximumLength: 80
+            text: root.query
+            onTextChanged: root.query = text
+            onActiveFocusChanged: root.editing = activeFocus || imageField.activeFocus || nameField.activeFocus
+            Keys.onPressed: function(event) {
+              if (event.key === Qt.Key_Escape) { root.endSearch(true); event.accepted = true; return }
+              if (event.key === Qt.Key_Down || event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                root.endSearch(false)
+                root.cursorActive = true
+                var first = root.cursorKeys.filter(function(k) { return k.indexOf("inst:") === 0 })[0]
+                if (first) root.cursorKey = first
+                event.accepted = true
+              }
+            }
+          }
+
+          // Hosts: storage, cluster, warnings and running tasks
+          Repeater {
+            model: root.hostRemotes
+            HostSection {
+              required property var modelData
+              width: column.width
+              rs: modelData
+            }
+          }
+
+          // Instances
+          Column {
+            visible: root.visibleRemotes.length > 0
+            width: parent.width
+            spacing: Style.space(6)
+
+            PanelSectionHeader {
+              text: strings.t("section.instances")
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            PlainText {
+              visible: root.instanceRows.length === 0
+              width: parent.width
+              text: root.connecting ? strings.t("hero.connecting") : (root.query !== "" ? strings.t("search.none") : strings.t("instances.none"))
+              color: root.dim
+              font.pixelSize: Style.font.body
+              horizontalAlignment: Text.AlignHCenter
+            }
+
+            Repeater {
+              model: root.instanceRows
+              Loader {
+                required property var modelData
+                // Instance highlights extend past the text; group labels don't.
+                x: modelData.kind === "instance" ? -root.rowBleed : 0
+                width: column.width + (modelData.kind === "instance" ? root.rowBleed * 2 : 0)
+                sourceComponent: modelData.kind === "instance" ? instanceComponent : groupComponent
+                onLoaded: item.row = modelData
+                onModelDataChanged: if (item) item.row = modelData
               }
             }
           }
@@ -1157,8 +1250,9 @@ Panel {
         text: listRow.glyph
         color: listRow.glyphColor
         font.pixelSize: Style.font.icon
+        // Left-aligned so the row's left inset matches its right one.
         Layout.preferredWidth: Style.space(20)
-        horizontalAlignment: Text.AlignHCenter
+        horizontalAlignment: Text.AlignLeft
       }
 
       ColumnLayout {
@@ -1244,7 +1338,7 @@ Panel {
           color: instRow.inst ? root.statusColor(instRow.inst) : root.dim
           font.pixelSize: Style.font.icon
           Layout.preferredWidth: Style.space(20)
-          horizontalAlignment: Text.AlignHCenter
+          horizontalAlignment: Text.AlignLeft
           opacity: instRow.inst && root.omacus.busy && root.omacus.busy[instRow.key] ? 0.45 : 1.0
 
           SequentialAnimation on opacity {
@@ -1285,13 +1379,6 @@ Panel {
               font.pixelSize: Style.font.caption
             }
 
-            Sparkline {
-              visible: !!(instRow.hist && instRow.hist.cpu && instRow.hist.cpu.length > 1)
-              Layout.preferredWidth: Style.space(44)
-              Layout.preferredHeight: Style.space(14)
-              values: instRow.hist ? instRow.hist.cpu : []
-              lineColor: root.foreground
-            }
           }
 
           PlainText {
@@ -1301,6 +1388,15 @@ Panel {
             font.pixelSize: Style.font.caption
             elide: Text.ElideRight
           }
+        }
+
+        // Spans both text lines.
+        Sparkline {
+          visible: root.omacus.backgroundStats && !!(instRow.hist && instRow.hist.cpu && instRow.hist.cpu.length > 1)
+          Layout.preferredWidth: Style.space(56)
+          Layout.fillHeight: true
+          values: instRow.hist ? instRow.hist.cpu : []
+          lineColor: root.foreground
         }
       }
 
@@ -1512,28 +1608,57 @@ Panel {
     }
   }
 
-  // A small CPU history line, drawn only while the panel is open.
+  // CPU over the last 15 minutes, scaled to the window's peak.
   component Sparkline: Canvas {
     id: spark
     property var values: []
     property color lineColor: root.foreground
     onValuesChanged: requestPaint()
     onLineColorChanged: requestPaint()
+    onWidthChanged: requestPaint()
+    onHeightChanged: requestPaint()
     onPaint: {
       var ctx = getContext("2d")
       ctx.reset()
       var list = values || []
       if (list.length < 2) return
+      // Spread what we have across the width: the newest 15 minutes, or less
+      // right after the shell starts.
+      var end = list[list.length - 1].t
+      var start = Math.max(end - Model.HISTORY_WINDOW_MS, list[0].t)
+      var span = Math.max(1, end - start)
+      var top = Model.historyScale(list)
+      var bottom = height - 0.5
+      var points = []
+      for (var i = 0; i < list.length; i++) {
+        var v = Math.max(0, Math.min(top, Number(list[i].v) || 0))
+        points.push({ x: Math.max(0, (list[i].t - start) / span) * (width - 1), y: bottom - v / top * (height - 2) })
+      }
+
+      // A faint baseline marks the graph's extent when the line is flat.
       ctx.strokeStyle = lineColor
+      ctx.lineWidth = 1
+      ctx.globalAlpha = 0.2
+      ctx.beginPath()
+      ctx.moveTo(0, bottom)
+      ctx.lineTo(width, bottom)
+      ctx.stroke()
+
+      ctx.fillStyle = lineColor
+      ctx.globalAlpha = 0.15
+      ctx.beginPath()
+      ctx.moveTo(points[0].x, bottom)
+      for (var j = 0; j < points.length; j++) ctx.lineTo(points[j].x, points[j].y)
+      ctx.lineTo(points[points.length - 1].x, bottom)
+      ctx.closePath()
+      ctx.fill()
+
       ctx.globalAlpha = 0.8
       ctx.lineWidth = 1.2
       ctx.beginPath()
-      for (var i = 0; i < list.length; i++) {
-        var x = i / (list.length - 1) * (width - 1)
-        var v = Math.max(0, Math.min(100, Number(list[i]) || 0))
-        var y = height - 1 - v / 100 * (height - 2)
-        if (i === 0) ctx.moveTo(x, y)
-        else ctx.lineTo(x, y)
+      for (var k = 0; k < points.length; k++) {
+        if (k === 0) ctx.moveTo(points[k].x, points[k].y)
+        else ctx.lineTo(points[k].x, points[k].y)
       }
       ctx.stroke()
     }
