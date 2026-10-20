@@ -1,6 +1,7 @@
 #!/usr/bin/python3 -I
 # Tests for helper.py, run against tests/fake-incus. Run: python3 -I tests/helper_test.py
 
+import base64
 import importlib.util
 import json
 import os
@@ -178,6 +179,28 @@ class Compaction(unittest.TestCase):
     self.assertTrue(result["over"])
     [result] = helper.run_many([["/usr/bin/sleep", "30"]], 0.5)
     self.assertTrue(result["timeout"])
+
+
+class AddRemote(unittest.TestCase):
+  def token(self, **fields):
+    doc = {"client_name": "laptop", "fingerprint": "ab" * 32, "addresses": ["10.0.0.5:8443", "[fd00::5]:8443"],
+           "secret": "s3cret", "expires_at": "0001-01-01T00:00:00Z"}
+    doc.update(fields)
+    return base64.b64encode(json.dumps(doc).encode()).decode()
+
+  def test_token_gives_addresses_and_fingerprint(self):
+    self.assertEqual(helper.decode_token(self.token()), (["10.0.0.5:8443", "[fd00::5]:8443"], "ab" * 32))
+
+  def test_bad_tokens_are_refused(self):
+    for token in (
+      "not base64!",
+      base64.b64encode(b"[]").decode(),
+      self.token(secret=""),
+      self.token(fingerprint="ab"),
+      self.token(addresses=[]),
+      self.token(addresses=["-x 10.0.0.5"]),
+    ):
+      self.assertIsNone(helper.decode_token(token), token)
 
 
 if __name__ == "__main__":

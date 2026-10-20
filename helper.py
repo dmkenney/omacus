@@ -4,14 +4,15 @@
 # The shell plugin runs every incus call through this file, so that each call
 # has a deadline, a byte ceiling and its own process group, and so the QML only
 # ever reads a small JSON document of a fixed shape. Nothing here touches the
-# disk: credentials stay in the incus client's own config, and every result
-# goes to stdout.
+# disk, except add-remote pinning a server certificate in the incus client's
+# own config: credentials stay there, and every result goes to stdout.
 #
 #   helper.py [--incus PATH] probe
 #   helper.py [--incus PATH] remotes
 #   helper.py [--incus PATH] snapshot REMOTE PROJECT [--instances-only]
 #   helper.py [--incus PATH] monitor REMOTE
 #   helper.py [--incus PATH] action VERB REMOTE PROJECT INSTANCE
+#   helper.py [--incus PATH] add-remote          (interactive, in a terminal)
 
 import json
 import os
@@ -47,6 +48,8 @@ NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}")
 INSTANCE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,62}")
 EVENT_ACTION_RE = re.compile(r"[a-z][a-z0-9-]{0,63}")
 ADDRESS_RE = re.compile(r"[0-9A-Fa-f:.]{2,45}")
+ADDRESS_PORT_RE = re.compile(r"(\[[0-9A-Fa-f:.]{2,45}\]|[A-Za-z0-9.-]{1,253})(:[0-9]{1,5})?")
+FINGERPRINT_RE = re.compile(r"[0-9A-Fa-f]{64}")
 OPERATION_ID_RE = re.compile(r"[0-9a-f-]{8,64}")
 # C0 and C1 controls, and the bidi overrides that can reorder a line.
 CONTROL_RE = re.compile("[\x00-\x1f\x7f-\x9f‪-‮⁦-⁩]")
@@ -812,6 +815,113 @@ def cmd_action(incus, verb, remote, project, name):
     emit({"ok": False, "error": result_error(result)})
 
 
+# add-remote
+#
+# Runs in a terminal, not under the shell. The token is read without echo and
+# reaches incus on stdin, never in an argv where other local users could read
+# it. A token carries the server's certificate fingerprint; incus checks it
+# only when the token is its argument, so the matching certificate is pinned
+# here first, the way incus pins it itself, and incus then connects with it
+# and asks for the token.
+
+def incus_config_dir():
+  if os.environ.get("INCUS_CONF"):
+    return os.environ["INCUS_CONF"]
+  base = os.environ.get("XDG_CONFIG_HOME", "")
+  if not os.path.isabs(base):
+    base = os.path.join(pwd.getpwuid(os.geteuid()).pw_dir, ".config")
+  return os.path.join(base, "incus")
+
+
+def decode_token(token):
+  import base64
+  try:
+    doc = json.loads(base64.b64decode(token, validate=True))
+  except ValueError:
+    return None
+  doc = as_dict(doc)
+  addrs = [a for a in as_list(doc.get("addresses")) if isinstance(a, str) and ADDRESS_PORT_RE.fullmatch(a)]
+  fingerprint = doc.get("fingerprint")
+  if not addrs or not doc.get("secret") or not isinstance(fingerprint, str) or not FINGERPRINT_RE.fullmatch(fingerprint):
+    return None
+  return addrs, fingerprint
+
+
+def server_certificate(addr):
+  import ssl
+  import urllib.parse
+  url = urllib.parse.urlsplit("https://" + addr)
+  try:
+    pem = ssl.get_server_certificate((url.hostname, url.port or 8443), timeout=10)
+  except (OSError, ValueError):
+    return None
+  return pem
+
+
+def cmd_add_remote(incus):
+  import getpass
+  import hashlib
+  import ssl
+  signal.signal(signal.SIGINT, signal.default_int_handler)
+  pinned = None
+  try:
+    name = input("Server name (e.g. homelab): ").strip()
+    if not NAME_RE.fullmatch(name) or name in (".", ".."):
+      print("Use letters, digits, dots, dashes and underscores.")
+      return 1
+    [listing] = run_many([[incus, "remote", "list", "--format", "json"]], QUERY_TIMEOUT, 256 * 1024)
+    listing = parse_json(listing)
+    if not isinstance(listing, dict):
+      print("Couldn't read the incus remotes.")
+      return 1
+    if name in listing:
+      print("A remote named %s already exists." % name)
+      return 1
+
+    token = getpass.getpass("Trust token (hidden): ").strip()
+    decoded = decode_token(token)
+    if decoded is None:
+      print("That isn't an Incus trust token. Create one on the server with: incus config trust add <name>")
+      return 1
+    addrs, fingerprint = decoded
+
+    pem = None
+    for addr in addrs:
+      pem = server_certificate(addr)
+      if pem is not None:
+        break
+    if pem is None:
+      print("Couldn't reach the server at %s." % ", ".join(addrs))
+      return 1
+    if hashlib.sha256(ssl.PEM_cert_to_DER_cert(pem)).hexdigest() != fingerprint.lower():
+      print("The server's certificate doesn't match the token. Not adding it.")
+      return 1
+
+    certs = os.path.join(incus_config_dir(), "servercerts")
+    os.makedirs(certs, 0o750, exist_ok=True)
+    path = os.path.join(certs, name + ".crt")
+    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644), "w") as f:
+      pinned = path
+      f.write(pem)
+
+    argv = [incus, "remote", "add", name] + ["https://" + a for a in addrs]
+    rc = subprocess.run(argv, input=token + "\n", text=True, env=child_env()).returncode
+    if rc == 0:
+      pinned = None
+    print()
+    return rc
+  except (KeyboardInterrupt, EOFError):
+    print()
+    return 130
+  finally:
+    # Drop the pin if incus didn't add the remote.
+    if pinned is not None:
+      try:
+        os.unlink(pinned)
+      except OSError:
+        pass
+
+
 def main(argv):
   load_libc()
   die_with_parent()
@@ -842,6 +952,8 @@ def main(argv):
     cmd_monitor(incus, args[0])
   elif command == "action" and len(args) == 4:
     cmd_action(incus, *args)
+  elif command == "add-remote" and not args:
+    sys.exit(cmd_add_remote(incus))
   else:
     fail("bad arguments")
 

@@ -61,13 +61,9 @@ Incus in the Omarchy bar. Omacus shows the containers and VMs on every Incus ser
   incus config trust add laptop      # prints a one-time token
   ```
 
-  Then on this machine:
+  Then press **Add server** in the panel. It asks for a name and the token in a terminal, without echoing the token, checks the server's certificate against the token, and passes the token to `incus remote add` on stdin, so it never shows up in a process listing. Avoid `incus remote add homelab <token>`: that puts the token on the command line, where other users on this machine can read it.
 
-  ```bash
-  incus remote add homelab <token>
-  ```
-
-  Omacus picks the new remote up when the client config changes, or at the latest the next time you open the panel. It uses the certificates the `incus` client already manages, and never asks for or stores a token or password.
+  Omacus picks the new remote up when the client config changes, or at the latest the next time you open the panel. It uses the certificates the `incus` client already manages, and never stores a token or password.
 
 ## Install
 

@@ -360,12 +360,8 @@ Item {
 
   function addRemote() {
     if (!installed) return
-    // The token goes straight from the prompt to incus; Omacus never sees it.
-    var script = 'read -r -p "Server name (e.g. homelab): " name || exit 130\n'
-      + 'if ! [[ $name =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]]; then echo "Use letters, digits, dots, dashes and underscores."; exit 1; fi\n'
-      + 'read -r -p "Trust token: " token || exit 130\n'
-      + '"$1" remote add "$name" "$token"'
-    presentCommand(["bash", "-c", script, "omacus", incusPath])
+    // The helper reads the token without echo and passes it to incus on stdin.
+    presentCommand(helperCommand(["add-remote"]))
   }
 
   function openShell(remote, inst) {
